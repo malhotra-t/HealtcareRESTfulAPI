@@ -1,0 +1,31 @@
+{
+"$schema": "http://json-schema.org/draft-04/schema#",
+"title": "Plan array",
+"type": "array",
+"items": {
+
+
+	 "title": "Plan",
+	 "description": "A representation of a person, company, organization, or place",
+	 "type": "object",
+	"properties": {
+		 "planType": { "type": "string" },
+		 "planName": { "type": "string" },
+		 "childDental": { "type": "boolean" },
+		 "costs" : {"type": "object", "properties" : {
+			 "copay": {"type":"number"},
+			 "deductible" : {"type":"number"}
+		 	}
+		 },
+		 "services": { "type": "array", "items" :{"type":"string"}
+	 				}
+		},
+		"required": [
+				     "planType",
+				     "planName",
+				     "childDental",
+				     "costs",
+				     "services"
+				   ]
+	}
+}
