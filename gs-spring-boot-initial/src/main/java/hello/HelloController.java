@@ -110,13 +110,15 @@ public class HelloController {
 				// Fetch schema from Redis for validation
 				//String schemaJsonStr = jedis.get("schema_" + entitySchema);
 				String schemaJsonStr = getEntityOrSchema("schema", entitySchema, request, resp);
-				if (schemaJsonStr == null) {
+				if (schemaJsonStr == null || schemaJsonStr.isEmpty()) {
 					resp.setStatus(HttpStatus.BAD_REQUEST.value());
 					return "No such schema found";
 				}
 				System.out.println(schemaJsonStr);
 
 				org.json.JSONObject rawSchema = new org.json.JSONObject(schemaJsonStr);
+				removeIds(rawSchema);
+				System.out.println("raw schema is:" + rawSchema);
 				Schema schemaJson = SchemaLoader.load(rawSchema);
 
 				// validate incoming json input
@@ -135,6 +137,8 @@ public class HelloController {
 				Map<String, String> simpleValMap = individualObjects.get(key);
 				jedis.hmset(key, simpleValMap);
 			}
+			
+			// TODO - revisit for lpush review
 			for (String key : relationships.keySet()) {
 				List<String> simpleValList = relationships.get(key);
 				String[] simpleValArr = simpleValList.toArray(new String[simpleValList.size()]);
@@ -146,17 +150,55 @@ public class HelloController {
 			System.out.println("relationships" + relationships);
 
 			String[] keyContents = rootObjKey.split("_");
+			
+			//Enqueue the document for Elasticsearch indexing
+			enqueueForIndexing(entitySchema, request, resp, keyContents[1]);		
 
 			return keyContents[1];
 
 		} catch (JSONException je) {
+			je.printStackTrace();
 			resp.setStatus(HttpStatus.BAD_REQUEST.value());
 			return "Input provided is not a JSON." + je.getMessage();
 		} catch (ValidationException ve) {
+			ve.printStackTrace();
 			resp.setStatus(HttpStatus.BAD_REQUEST.value());
 			return "Sorry JSON could not be validated against the schema." + ve.getErrorMessage();
 		}
 
+	}
+
+	private void enqueueForIndexing(String entitySchema, HttpServletRequest request, HttpServletResponse resp,
+			String id) {
+		if(!entitySchema.equals("schema")){
+			String savedObjStr = getEntityOrSchema(entitySchema, id, request, resp);
+			jedis.lpush("esindexer", savedObjStr);
+		}
+	}
+
+	private void removeIds(org.json.JSONObject rawSchema) {
+		rawSchema.remove("id");
+		for(Object key:rawSchema.keySet()){
+			Object val = rawSchema.get((String)key);
+			if(val instanceof JSONObject){
+				removeIds((JSONObject) val);
+			} else if(val instanceof JSONArray){
+				int len = ((JSONArray) val).length();
+				for (int i = 0; i < len; i++) {
+					JSONObject item = ((JSONArray) val).getJSONObject(i);
+					removeIds(item);
+				}
+			
+			} else if(((String)key).equals("additionalProperties")){
+				
+				if(((String)val).equals("false")){
+					rawSchema.put((String)key, false);
+				} else{
+					rawSchema.put((String)key, true);
+				}
+				
+			}
+		}
 	}
 
 	private String updateObjectsAndRelationships(JSONObject incJsonObj, String parentSchema,
@@ -231,9 +273,6 @@ public class HelloController {
 		return "Greetings from Spring Boot!";
 	}
 
-
-	
-	//TODO - Eliminate id while returning schema
 	// step 1 - allow GET request
 	@RequestMapping(method = RequestMethod.GET, path = "/{schema}/{id}")
 	public String getEntityOrSchema(@PathVariable String schema, @PathVariable String id, HttpServletRequest request,
@@ -244,14 +283,9 @@ public class HelloController {
 		// fetch simple values of root object from redis using schema and id
 		String inputKey = schema + "_" + id;
 		Map<String, String> jsonEntity = jedis.hgetAll(inputKey);
-		boolean schemaFlag = false;
-		if(inputKey.contains("schema")){
-			jsonEntity.remove("id");
-			schemaFlag = true;
-		}
 
 		// return HTTP status code 204 for No Content.
-		if (jsonEntity == null) {
+		if (jsonEntity == null || jsonEntity.isEmpty()) {
 			resp.setStatus(HttpStatus.NO_CONTENT.value());
 			return "";
 		}
@@ -260,7 +294,7 @@ public class HelloController {
 
 		// get deeply nested JSON object
 
-		appendDeeplyNestedObjects(inputKey, jsonObj, schemaFlag);
+		appendDeeplyNestedObjects(inputKey, jsonObj);
 
 		// Step 3 - return appropriate response
 		String jsonEntityStr = jsonObj.toString();
@@ -296,7 +330,7 @@ public class HelloController {
 		return jsonEntityStr;
 	}
 
-	private void appendDeeplyNestedObjects(String nestedObjKey, JSONObject jsonObj, boolean schemaFlag) {
+	private void appendDeeplyNestedObjects(String nestedObjKey, JSONObject jsonObj) {
 		Set<String> relKeySet = jedis.keys(nestedObjKey + "_*");
 
 		for (String key : relKeySet) {
@@ -308,12 +342,12 @@ public class HelloController {
 				JSONArray arr = new JSONArray();
 				for (String childKey : relChildKeys) {
 					Map<String, String> childMap = jedis.hgetAll(childKey);
-					if(schemaFlag){
-						childMap.remove("id");
-					}
+//					if(schemaFlag){
+//						childMap.remove("id");
+//					}
 					
 					JSONObject innerObj = new JSONObject(childMap);
-					appendDeeplyNestedObjects(childKey, innerObj, schemaFlag);
+					appendDeeplyNestedObjects(childKey, innerObj);
 					arr.put(innerObj);
 				}
 				String[] keyContents = relChildKeys.get(0).split("_");
@@ -321,20 +355,83 @@ public class HelloController {
 			} else {
 				String innerObjKey = relChildKeys.get(0);
 				Map<String, String> childMap = jedis.hgetAll(innerObjKey);
-				if(schemaFlag){
-					childMap.remove("id");
-				}				
+//				if(schemaFlag){
+//					childMap.remove("id");
+//				}				
 				String[] keyContents = innerObjKey.split("_");
 				JSONObject innerObj = new JSONObject(childMap);
 				jsonObj.put(keyContents[0], innerObj);
-				appendDeeplyNestedObjects(innerObjKey, innerObj, schemaFlag);
+				appendDeeplyNestedObjects(innerObjKey, innerObj);
 			}
 		}
 
 	}
 
+	@RequestMapping(method = RequestMethod.DELETE, path = "/{entitySchema}/{id}")
+	public String deleteSchemaOrEntity(@PathVariable String entitySchema, @PathVariable String id, HttpServletRequest request, HttpServletResponse resp){
+		String inputKey = entitySchema + "_" + id;
+		Long delStat = jedis.del(inputKey);
+		if(delStat>0){
+			Set<String> relKeySet = jedis.keys(inputKey + "_*");
+			System.out.println("relKeySet: " + relKeySet);
+			for(String indKey:relKeySet){
+				Long keyListLen = jedis.llen(indKey);
+				List<String> relChildKeys = jedis.lrange(indKey, 0, keyListLen);
+				for(String childKey : relChildKeys){
+					jedis.del(childKey);
+				}
+				jedis.del(indKey);
+			}
+			return "Deleted";
+		}else{
+			resp.setStatus(HttpStatus.NO_CONTENT.value());
+			return "Document not found!";
+		}
+		
+	}
+	
+	@RequestMapping(method = RequestMethod.PUT, consumes = "application/json", path = "/{entitySchema}/{id}")
+	public String putEntityOrSchema(@PathVariable String entitySchema, @PathVariable String id, HttpServletRequest request, HttpServletResponse resp) {
+		String inputKey = entitySchema + "_" + id;
+		deleteSchemaOrEntity(entitySchema,id,request,resp);
+		String newObjId = createEntityOrSchema(entitySchema, request, resp);
+		if(resp.getStatus()==400){
+			return newObjId;
+		}
+		String newInputKey = entitySchema + "_" + newObjId;
+		Map<String, String> rootSimpleValMap = jedis.hgetAll(newInputKey);
+		
+		//Don't do for schema
+		if(!entitySchema.equals("schema")){
+			jedis.del(newInputKey);
+			rootSimpleValMap.put("id", id);
+		}		
+		jedis.hmset(inputKey, rootSimpleValMap);
+		
+		if(!entitySchema.equals("schema")){
+			//Retrieve rel keys from new input key
+			Set<String> relKeyList = jedis.keys(newInputKey + "_*");
+			
+			//Iterate on rel keys to fetch corresponding object keys
+			for(String relKey : relKeyList){
+				Long listLen = jedis.llen(relKey);
+				String[] strArr = relKey.split("_");
+				int arrLen = strArr.length;
+			
+				//Form new rel keys using existing id
+				String newRelKey = inputKey + "_" + strArr[arrLen-1];
+				List<String> innerKeyList = jedis.lrange(relKey, 0, listLen);
+				
+				//Copy the inner list of keys to the newly created rel key
+				jedis.lpush(newRelKey, innerKeyList.toArray(new String[innerKeyList.size()]));
+			}
+		}		
+		enqueueForIndexing(entitySchema, request, resp, id);
+		return id;
+	}
+	
 	@RequestMapping(method = RequestMethod.PATCH, consumes = "application/json", path = "/{entitySchema}")
-	public String mergeEntity(@PathVariable String entitySchema, HttpServletRequest request, HttpServletResponse resp) {
+	public String mergeEntityOrSchema(@PathVariable String entitySchema, HttpServletRequest request, HttpServletResponse resp) {
 		// step 2 - read json and parse it using json simple
 
 		StringBuffer jsonStringBuffer = new StringBuffer();
@@ -347,28 +444,42 @@ public class HelloController {
 
 			String jsonData = jsonStringBuffer.toString();
 			org.json.JSONObject incJsonObj = new org.json.JSONObject(jsonData);
-			// Fetch schema from Redis for validation
-			String schemaJsonStr = jedis.get("schema_" + entitySchema);
-			org.json.JSONObject rawSchema = new org.json.JSONObject(schemaJsonStr);
-			Schema schemaJson = SchemaLoader.load(rawSchema);
-
-			// validate incoming json input
-			schemaJson.validate(incJsonObj);
-			mergeIndividualObjects(incJsonObj, entitySchema);
+			validateSchemaForEntities(entitySchema, incJsonObj, request, resp);			
+			
+			String objId;
+			if(entitySchema.equals("schema")){
+				objId = incJsonObj.getString("title");
+			}else{
+				objId = incJsonObj.getString("id");
+			}
+			mergeIndividualObjects(incJsonObj, entitySchema, objId);
+			enqueueForIndexing(entitySchema, request, resp, objId);
 			return "merge successful";
 		} catch (ValidationException ve) {
 			resp.setStatus(HttpStatus.BAD_REQUEST.value());
 			return "Sorry JSON could not be validated against the schema." + ve.getErrorMessage();
 		} catch (Exception e) {
 			resp.setStatus(HttpStatus.BAD_REQUEST.value());
-			return "";
+			e.printStackTrace();
+			return "Unexpected error";
 		}
 
 	}
 
-	private void mergeIndividualObjects(JSONObject incJsonObj, String entitySchema) {
+	private void validateSchemaForEntities(String entitySchema, org.json.JSONObject incJsonObj, HttpServletRequest request, HttpServletResponse resp) {
+		if(!entitySchema.equals("schema")){
+			// Fetch schema from Redis for validation
+			String schemaJsonStr = getEntityOrSchema(entitySchema, incJsonObj.getString("id"), request, resp);
+			org.json.JSONObject rawSchema = new org.json.JSONObject(schemaJsonStr);
+			Schema schemaJson = SchemaLoader.load(rawSchema);
 
-		String objId = (String) incJsonObj.get("id");
+			// validate incoming json input
+			schemaJson.validate(incJsonObj);
+		}
+	}
+
+	private void mergeIndividualObjects(JSONObject incJsonObj, String entitySchema, String objId) {
+
 		String rootObjKey = entitySchema + "_" + objId;
 
 		for (Object keyObj : incJsonObj.keySet()) {
@@ -378,18 +489,40 @@ public class HelloController {
 					|| value instanceof Boolean) {
 				jedis.hset(rootObjKey, field, value.toString());
 			} else if (value instanceof JSONObject) {
-				mergeIndividualObjects((JSONObject) value, field);
-
+				checkIdAndRecursiveMerge(field, value, rootObjKey);
 			} else if (value instanceof JSONArray) {
 				JSONArray valueArr = (JSONArray) value;
 				int len = valueArr.length();
 				for (int i = 0; i < len; i++) {
-					mergeIndividualObjects((JSONObject) valueArr.get(i), field);
+					//String innerObjId = ((JSONObject) valueArr.get(i)).getString("id");
+					//mergeIndividualObjects((JSONObject) valueArr.get(i), field, innerObjId);
+					checkIdAndRecursiveMerge(field, valueArr.get(i), rootObjKey);
+					
 				}
 			}
 
 		}
 
+	}
+
+	private void checkIdAndRecursiveMerge(String field, Object value, String rootObjKey) {
+		
+		try{
+			Object innerObjId = ((JSONObject) value).get("id");
+			String innerObjIdStr = (String)innerObjId;
+			mergeIndividualObjects((JSONObject) value, field, innerObjIdStr);
+		}catch(JSONException je){
+			//No ID found for new object. Create new ID and save object
+			UUID newUid = UUID.randomUUID();
+			//Form relationship key
+			String relKey = rootObjKey + "_" + field;
+			//Form relationship value
+			String relVal = field + "_" + newUid;
+			//Save relationship in redis
+			jedis.lpush(relKey, relVal);
+			((JSONObject) value).put("id", newUid.toString());
+			mergeIndividualObjects((JSONObject)value, field, newUid.toString());
+		}
 	}
 
 }

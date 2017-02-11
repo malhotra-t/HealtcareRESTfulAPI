@@ -1,12 +1,6 @@
 {
-"$schema": "http://json-schema.org/draft-04/schema#",
-"title": "Plan array",
-"type": "array",
-"items": {
-
-
-	 "title": "Plan",
-	 "description": "A representation of a person, company, organization, or place",
+	"title": "plan",
+	 "description": "A representation of health insurance plan",
 	 "type": "object",
 	"properties": {
 		 "planType": { "type": "string" },
@@ -17,7 +11,11 @@
 			 "deductible" : {"type":"number"}
 		 	}
 		 },
-		 "services": { "type": "array", "items" :{"type":"string"}
+		 "services": { "type": "array", "items" :{"type":"object", 
+		 											"properties":{
+		 													"serviceDesc":{"type":"string"}
+		 													}
+		 										}
 	 				}
 		},
 		"required": [
@@ -27,5 +25,4 @@
 				     "costs",
 				     "services"
 				   ]
-	}
 }
