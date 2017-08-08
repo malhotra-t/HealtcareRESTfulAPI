@@ -11,3 +11,7 @@ The project employs the notion of json-schema for defining a schema (json-schema
 JSON schema validation on business model entities ensures data integrity while allowing the ubiquitous json to flow through all the tiers of the application.
 
 Additionally, the project performs real time updates to ElasticSearch to support Lucene query syntax.
+
+The overall CQRS (Command and Query Response Segregation) architecture is as seen in image below:
+
+![architecture diagram](architecture.png "CQRS architecture diagram")
